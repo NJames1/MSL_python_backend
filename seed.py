@@ -1,7 +1,6 @@
 from db import SessionLocal, init_db
 import models
 
-
 def seed():
     # ensure tables exist
     init_db()
@@ -19,8 +18,8 @@ def seed():
         db.add(device)
         db.flush()
 
-        # create a sample location
-        loc = models.Location(centroid_lat=37.7749, centroid_lon=-122.4194)
+        # create a sample location (Updated to Nairobi coordinates)
+        loc = models.Location(centroid_lat=-1.2864, centroid_lon=36.8172)
         db.add(loc)
         db.flush()
 
@@ -28,8 +27,8 @@ def seed():
         fp = models.Fingerprint(location_id=loc.id, features={"sample": "value"}, confidence=0.9000)
         db.add(fp)
 
-        # add a raw scan pointing to device
-        scan = models.RawScan(device_id=device.id, cell_data={"cells": []}, wifi_data={"aps": []}, gps_lat=37.7749, gps_lon=-122.4194)
+        # add a raw scan pointing to device (Updated to Nairobi coordinates)
+        scan = models.RawScan(device_id=device.id, cell_data={"cells": []}, wifi_data={"aps": []}, gps_lat=-1.2864, gps_lon=36.8172)
         db.add(scan)
 
         db.commit()
@@ -39,7 +38,6 @@ def seed():
         raise
     finally:
         db.close()
-
 
 if __name__ == '__main__':
     seed()
