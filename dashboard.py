@@ -16,7 +16,7 @@ st.markdown("""
     .main { background-color: #0F172A; }
     .stMetric { background-color: #1E293B; padding: 15px; border-radius: 10px; border-left: 5px solid #2DD4BF; }
     </style>
-""", unsafe_allow_escaping=True)
+""", unsafe_allow_html=True)
 
 st.title("🛰️ MSL Identity-Aware Localization")
 st.markdown("### Power-Optimized Mobile Localization System")
