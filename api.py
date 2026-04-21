@@ -35,6 +35,7 @@ class ScanResultResponse(BaseModel):
 
 class ScanSubmitRequest(BaseModel):
     deviceId: str
+    userName: str        # <--- FIX 1: Allows the server to receive the name
     fingerprint: str
     locationId: Optional[str] = None
     gpsLat: Optional[float] = None
@@ -154,6 +155,7 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
         # Create raw scan record with fallback coordinates if GPS is unavailable
         scan = models.RawScan(
             device_id=device.id,
+            user_name=request.userName,  # <--- FIX 2: Writes the name to the database
             cell_data={"fingerprint": request.fingerprint}, 
             wifi_data={"submitted": True},
             gps_lat=request.gpsLat if request.gpsLat is not None else 0.0,
