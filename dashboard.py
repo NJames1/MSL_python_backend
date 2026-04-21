@@ -83,9 +83,9 @@ if db_url_input:
             
             # Formatting the dataframe for better aesthetics
             if not df.empty:
-                # If we are looking at scans, let's highlight the Identity column
+                # Just display the clean dataframe without math-based highlighting
                 st.dataframe(
-                    df.style.highlight_max(axis=0, subset=['user_name'] if 'user_name' in df.columns else []),
+                    df, 
                     use_container_width=True, 
                     height=500
                 )
