@@ -17,6 +17,7 @@ class RawScan(Base):
     id = Column(Integer, primary_key=True)
     device_id = Column(Integer, ForeignKey("devices.id"), nullable=True)
     user_name = Column(String)
+    location_id = Column(String)
     timestamp = Column(DateTime, default=datetime.utcnow)
     cell_data = Column(JSON)
     wifi_data = Column(JSON)

@@ -35,9 +35,9 @@ class ScanResultResponse(BaseModel):
 
 class ScanSubmitRequest(BaseModel):
     deviceId: str
-    userName: str        # <--- FIX 1: Allows the server to receive the name
+    userName: str        
     fingerprint: str
-    locationId: Optional[str] = None
+    locationId: Optional[str] = None # The server receives the Room Name here
     gpsLat: Optional[float] = None
     gpsLon: Optional[float] = None
 
@@ -53,15 +53,12 @@ class ApiResponse(BaseModel):
 def get_stats(db: Session = Depends(get_db)):
     """Get dashboard statistics"""
     try:
-        # Count total registered devices
         total_devices = db.query(models.Device).count()
         
-        # Fetch the 50 most recent raw scans
         recent_scans = db.query(models.RawScan).order_by(
             models.RawScan.timestamp.desc()
         ).limit(50).all()
         
-        # Calculate average confidence from the calibrated Fingerprint database
         fingerprints = db.query(models.Fingerprint).all()
         avg_confidence = 0.0
         if fingerprints:
@@ -69,13 +66,12 @@ def get_stats(db: Session = Depends(get_db)):
             if confidences:
                 avg_confidence = sum(confidences) / len(confidences)
         
-        # Format recent scans for the dashboard table
         recent_scans_formatted = [
             {
                 "id": f"scan-{scan.id}",
                 "deviceId": f"DEV{scan.device_id or 0:03d}",
-                "confidence": 0.85, # Default placeholder for raw scan list
-                "locationId": None,
+                "confidence": 0.85,
+                "locationId": scan.location_id, # Updated to show room in stats
                 "timestamp": scan.timestamp.isoformat() if scan.timestamp else datetime.utcnow().isoformat(),
                 "matched": True,
                 "lat": scan.gps_lat,
@@ -86,53 +82,40 @@ def get_stats(db: Session = Depends(get_db)):
         
         response = DashboardStatsResponse(
             totalDevices=total_devices,
-            presentDevices=max(1, total_devices // 2),  # Estimation logic
+            presentDevices=max(1, total_devices // 2),
             absentDevices=max(0, total_devices - (total_devices // 2)),
             averageConfidence=min(avg_confidence, 0.95),
             recentScans=recent_scans_formatted
         )
-        logger.info("Dashboard stats retrieved")
         return response
     except Exception as e:
         logger.error(f"Error getting stats: {str(e)}")
-        # Return mock data on error to prevent dashboard crash
-        return DashboardStatsResponse(
-            totalDevices=0,
-            presentDevices=0,
-            absentDevices=0,
-            averageConfidence=0.0,
-            recentScans=[]
-        )
+        return DashboardStatsResponse(totalDevices=0, presentDevices=0, absentDevices=0, averageConfidence=0.0, recentScans=[])
 
 @router.get("/live", response_model=List[ScanResultResponse])
 def get_live_scans(db: Session = Depends(get_db)):
     """Get live scan results with Machine Learning Inference applied"""
     try:
-        # Pull the latest 20 scans from the database
         scans = db.query(models.RawScan).order_by(
             models.RawScan.timestamp.desc()
         ).limit(20).all()
         
         results = []
         for scan in scans:
-            # PHASE 2: MACHINE LEARNING INFERENCE
-            # Pass the raw radio signals to the matching algorithm to predict the true location
             predicted_lat, predicted_lon, ml_confidence = predict_device_location(scan.cell_data, db)
             
             results.append(
                 ScanResultResponse(
                     id=scan.id,
                     deviceId=f"DEV{scan.device_id or 0:03d}",
-                    confidence=ml_confidence, # Use the actual ML confidence score
-                    locationId=None,
+                    confidence=ml_confidence,
+                    locationId=scan.location_id, # Display ground truth if available
                     timestamp=scan.timestamp.isoformat() if scan.timestamp else datetime.utcnow().isoformat(),
                     matched=True if ml_confidence > 0.0 else False,
-                    lat=predicted_lat, # Map uses predicted coordinates, not raw GPS
-                    lng=predicted_lon  # Map uses predicted coordinates, not raw GPS
+                    lat=predicted_lat,
+                    lng=predicted_lon
                 )
             )
-            
-        logger.info(f"Retrieved and processed {len(results)} live scans via ML")
         return results
     except Exception as e:
         logger.error(f"Error getting live scans: {str(e)}")
@@ -152,10 +135,12 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
             db.add(device)
             db.flush()
         
-        # Create raw scan record with fallback coordinates if GPS is unavailable
+        # --- THE CRITICAL FIX ---
+        # We now pass location_id=request.locationId to the DB model
         scan = models.RawScan(
             device_id=device.id,
-            user_name=request.userName,  # <--- FIX 2: Writes the name to the database
+            user_name=request.userName,
+            location_id=request.locationId,  # <--- SAVES ROOM NAME (e.g., AW201)
             cell_data={"fingerprint": request.fingerprint}, 
             wifi_data={"submitted": True},
             gps_lat=request.gpsLat if request.gpsLat is not None else 0.0,
@@ -164,24 +149,20 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
         db.add(scan)
         db.commit()
         
-        logger.info(f"Scan submitted successfully for device {request.deviceId}")
+        logger.info(f"Scan submitted successfully: Device {request.deviceId} at {request.locationId}")
         return ApiResponse(
             success=True,
             data={
                 "scanId": scan.id,
-                "deviceId": request.deviceId,
+                "location": request.locationId,
                 "timestamp": scan.timestamp.isoformat()
             }
         )
     except Exception as e:
         db.rollback()
         logger.error(f"Error submitting scan: {str(e)}")
-        return ApiResponse(
-            success=False,
-            error=str(e)
-        )
+        return ApiResponse(success=False, error=str(e))
 
 @router.get("/health")
 def health_check():
-    """Health check endpoint"""
     return {"status": "healthy", "message": "MSL Backend is running"}
