@@ -1,82 +1,97 @@
 import pandas as pd
 import json
+import joblib
 from sqlalchemy import create_engine
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, accuracy_score
 
-# 1. Database Connection (Ensure it starts with postgresql://)
+# 1. Database Connection
 DB_URL = "postgresql://msl_db_bx39_user:NfV5fQ7kLojvg920DrpmcqLg8RwLFMEQ@dpg-d71ak3vgi27c73fav4ug-a.oregon-postgres.render.com/msl_db_bx39"
 
-def extract_and_flatten_data():
+def train_localization_model():
     print("🔌 Connecting to database...")
     engine = create_engine(DB_URL)
     
-    # Pulling from the table we verified has your data
-    query = "SELECT * FROM raw_scans;" 
+    # We only pull scans that have a Ground Truth location_id
+    query = "SELECT * FROM raw_scans WHERE location_id IS NOT NULL;" 
     
     try:
         df_raw = pd.read_sql(query, engine)
-        print(f"✅ Successfully pulled {len(df_raw)} raw scans.")
+        if len(df_raw) < 10:
+            print(f"⚠️ Only {len(df_raw)} labeled scans found. Need more data to train effectively.")
+            return
+        print(f"✅ Successfully pulled {len(df_raw)} labeled scans.")
     except Exception as e:
         print(f"❌ Database error: {e}")
-        return None
+        return
 
-    print("⚙️ Flattening nested JSON into ML Feature Matrix...")
+    print("⚙️ Flattening RF signatures into Feature Matrix...")
     flattened_data = []
 
-    for index, row in df_raw.iterrows():
-        # Since there is no 'location_id', we will combine the GPS coordinates to act as our 'Target Label'
-        label = f"Lat:{row['gps_lat']}_Lon:{row['gps_lon']}"
-        
-        scan_features = {'target_location': label}
+    for _, row in df_raw.iterrows():
+        # Target Label is now the actual Room/Location name from your dropdown
+        scan_features = {'target_location': row['location_id']}
         
         # --- Extract Wi-Fi Signals ---
         try:
             wifi_payload = row['wifi_data']
-            # Convert string to dictionary if necessary
             if isinstance(wifi_payload, str):
                 wifi_payload = json.loads(wifi_payload)
-                
-            if isinstance(wifi_payload, list):
-                for wifi in wifi_payload:
+            
+            # The Android app sends this as a JSON string inside the 'fingerprint' key
+            if isinstance(wifi_payload, dict) and 'fingerprint' in wifi_payload:
+                inner_data = json.loads(wifi_payload['fingerprint'])
+                for wifi in inner_data.get('wifiInfo', []):
                     bssid = wifi.get('bssid', 'unknown')
                     rssi = wifi.get('rssi', -100)
                     scan_features[f"WIFI_{bssid}"] = rssi
         except Exception:
-            pass # Gracefully skip any corrupted rows
+            pass
             
         # --- Extract Cellular Signals ---
         try:
             cell_payload = row['cell_data']
-            # Convert string to dictionary if necessary
             if isinstance(cell_payload, str):
                 cell_payload = json.loads(cell_payload)
                 
-            if isinstance(cell_payload, list):
-                for cell in cell_payload:
+            if isinstance(cell_payload, dict) and 'fingerprint' in cell_payload:
+                inner_data = json.loads(cell_payload['fingerprint'])
+                for cell in inner_data.get('cellInfo', []):
                     cid = cell.get('cid', 'unknown')
                     rsrp = cell.get('rsrp', -100)
                     scan_features[f"CELL_{cid}"] = rsrp
         except Exception:
-            pass # Gracefully skip any corrupted rows
+            pass
             
         flattened_data.append(scan_features)
 
-    # Convert to a Machine Learning ready DataFrame
-    df_ml = pd.DataFrame(flattened_data)
-
-    # ML models crash on missing data. Fill unseen routers with -100 dBm (dead signal)
-    df_ml.fillna(-100, inplace=True)
-
-    print("\n🚀 Feature Matrix Extraction Complete!")
-    print("-" * 50)
-    print(f"Total Samples (Rows): {df_ml.shape[0]}")
-    print(f"Total Unique RF Signals (Columns): {df_ml.shape[1] - 1}") 
-    print("-" * 50)
+    # 2. Prepare Data for Scikit-Learn
+    df_ml = pd.DataFrame(flattened_data).fillna(-100)
     
-    return df_ml
+    X = df_ml.drop('target_location', axis=1) # Features (Signals)
+    y = df_ml['target_location']               # Target (Room Name)
+    
+    # Save the feature column names (very important for prediction later!)
+    feature_names = X.columns.tolist()
+    joblib.dump(feature_names, 'model_features.pkl')
 
-# Execute the extraction
-ml_dataframe = extract_and_flatten_data()
+    # 3. Split and Train
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    print(f"🧠 Training Random Forest on {len(X_train)} samples...")
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
 
-# Preview the beautiful, flattened matrix!
-if ml_dataframe is not None:
-    print(ml_dataframe.head())
+    # 4. Evaluate Performance
+    y_pred = model.predict(X_test)
+    print("\n📊 Model Evaluation:")
+    print(f"Accuracy Score: {accuracy_score(y_test, y_pred):.2%}")
+    print(classification_report(y_test, y_pred))
+
+    # 5. Save the Brain
+    joblib.dump(model, 'localization_model.pkl')
+    print("💾 Model saved as 'localization_model.pkl'")
+
+if __name__ == '__main__':
+    train_localization_model()
