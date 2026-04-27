@@ -1,100 +1,98 @@
 import streamlit as st
 import pandas as pd
-from sqlalchemy import create_engine, inspect
+import plotly.express as px
+from sqlalchemy import create_engine
+from datetime import datetime, timedelta
 
-# 1. Page Configuration (Midnight & Teal Engineering Theme)
-st.set_page_config(
-    page_title="MSL Mission Control", 
-    layout="wide", 
-    page_icon="📡",
-    initial_sidebar_state="collapsed"
-)
+# --- 1. CONFIG & STYLING ---
+st.set_page_config(page_title="MSL Lecturer Dashboard", layout="wide")
 
-# Custom CSS for that "Engineering" Look
+# Custom CSS to mimic the rounded card look from your sample image
 st.markdown("""
     <style>
-    .main { background-color: #0F172A; }
-    .stMetric { background-color: #1E293B; padding: 15px; border-radius: 10px; border-left: 5px solid #2DD4BF; }
+    .metric-card {
+        background-color: #fdf2e9;
+        padding: 20px;
+        border-radius: 15px;
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.05);
+        text-align: center;
+    }
     </style>
-""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
-st.title("🛰️ MSL Identity-Aware Localization")
-st.markdown("### Power-Optimized Mobile Localization System")
-st.markdown("---")
+# --- 2. DATABASE CONNECTION ---
+# Use your External Connection String from Render
+DB_URL = "postgresql://james:YmeXArVGRY19ermS7lXy1Op4fVv00Yro@dpg-d7n6k868bjmc738msds0-a.oregon-postgres.render.com/msl_live_demo"
 
-# 2. Database Connection Handling
-db_url_input = st.sidebar.text_input("Render DB URL", type="password")
+@st.cache_data(ttl=60) # Refresh data every 60 seconds
+def load_data():
+    engine = create_engine(DB_URL)
+    query = "SELECT * FROM raw_scans WHERE timestamp >= CURRENT_DATE"
+    df = pd.read_sql(query, engine)
+    return df
 
-if db_url_input:
-    # Prefix fix for SQLAlchemy
-    if db_url_input.startswith("postgres://"):
-        db_url_input = db_url_input.replace("postgres://", "postgresql://", 1)
+try:
+    df = load_data()
+except Exception as e:
+    st.error(f"Could not connect to Render DB: {e}")
+    st.stop()
 
-    try:
-        engine = create_engine(db_url_input)
-        insp = inspect(engine)
-        existing_tables = insp.get_table_names()
+# --- 3. LOGIC PROCESSING ---
+total_scans = len(df)
+# Verified = Student's CID matched the Lecturer's CID
+verified_df = df[df['proximity_verified'] == True].drop_duplicates(subset=['user_name'])
+flagged_df = df[df['proximity_verified'] == False].drop_duplicates(subset=['user_name'])
 
-        # --- NEW NAVIGATION HUB (Clickable Icons) ---
-        st.markdown("#### 🛠️ Select Data View")
-        
-        # Mapping our tables to professional icons and names
-        # Adjust names ('raw_scans', etc.) to match your models.py
-        view_map = {
-            "📡 Live Scans": "raw_scans",
-            "📱 Registered Devices": "devices",
-            "📍 ML Fingerprints": "fingerprints"
-        }
-        
-        # Filter only tables that actually exist in your DB
-        available_views = [k for k, v in view_map.items() if v in existing_tables]
-        
-        if not available_views:
-            st.error(f"No project tables found! Detected: {existing_tables}")
-            selected_view = None
-        else:
-            # Horizontal Selection (Segmented Control / Radio)
-            selected_label = st.radio(
-                "Navigate Database:", 
-                available_views, 
-                horizontal=True,
-                label_visibility="collapsed"
-            )
-            selected_view = view_map[selected_label]
+# --- 4. TOP SECTION: ENGAGEMENT METRICS ---
+st.title("👨‍🏫 Lecturer Command Center")
+st.write(f"Showing activity for **{datetime.now().strftime('%A, %d %B %Y')}**")
 
-        # 3. Data Retrieval & Display
-        if selected_view:
-            query = f"SELECT * FROM {selected_view} ORDER BY id DESC LIMIT 100;"
-            df = pd.read_sql(query, engine)
+col1, col2, col3, col4 = st.columns(4)
 
-            # Metric Bar
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                st.metric("Entries in View", len(df))
-            with m2:
-                # Count unique people if user_name column exists
-                unique_users = df['user_name'].nunique() if 'user_name' in df.columns else "N/A"
-                st.metric("Active Personnel", unique_users)
-            with m3:
-                st.button("🔄 Force Refresh", on_click=lambda: st.rerun(), use_container_width=True)
+with col1:
+    st.metric("Total Scans", total_scans, delta="Live", delta_color="normal")
 
-            # Interactive Table
-            st.markdown(f"### {selected_label} Data Output")
-            
-            # Formatting the dataframe for better aesthetics
-            if not df.empty:
-                # Just display the clean dataframe without math-based highlighting
-                st.dataframe(
-                    df, 
-                    use_container_width=True, 
-                    height=500
-                )
-            else:
-                st.info("Table is empty. Send a scan from the Android app to begin.")
+with col2:
+    if st.button(f"✅ Verified: {len(verified_df)}"):
+        st.session_state.view = "verified"
 
-    except Exception as e:
-        st.error(f"⚠️ Connection Error: {e}")
+with col3:
+    if st.button(f"🚩 Flagged: {len(flagged_df)}"):
+        st.session_state.view = "flagged"
 
+with col4:
+    attendance_rate = (len(verified_df) / 50 * 100) # Assuming class size of 50
+    st.metric("Attendance Rate", f"{attendance_rate}%", delta=f"{len(verified_df)}/50")
+
+# --- 5. MIDDLE SECTION: ACTIVITY CHART ---
+st.subheader("Arrival Activity")
+if not df.empty:
+    # Resample to show scans per hour
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    chart_data = df.set_index('timestamp').resample('1H').count().reset_index()
+    
+    fig = px.area(chart_data, x='timestamp', y='id', 
+                  title="Students entering American Wing over time",
+                  color_discrete_sequence=['#ff4b4b'])
+    fig.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+    st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info("🗝️ Enter your Render Database URL in the sidebar to begin monitoring.")
-    st.image("https://img.icons8.com/clouds/500/satellite.png", width=250)
+    st.info("Waiting for the first scan of the day...")
+
+# --- 6. DRILL-DOWN: STUDENT NAMES ---
+if 'view' in st.session_state:
+    st.divider()
+    if st.session_state.view == "verified":
+        st.success("### Students Confirmed in Proximity")
+        if not verified_df.empty:
+            st.table(verified_df[['user_name', 'timestamp', 'rf_prediction']])
+        else:
+            st.write("No students verified yet.")
+            
+    elif st.session_state.view == "flagged":
+        st.error("### Devices Outside Proximity Pool")
+        st.warning("These devices scanned but their Cell ID does not match the room anchors.")
+        if not flagged_df.empty:
+            st.table(flagged_df[['user_name', 'timestamp', 'serving_cell']])
+        else:
+            st.write("No suspicious activity detected.")
