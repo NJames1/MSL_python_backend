@@ -6,7 +6,8 @@ import os
 # --- DATABASE CONFIGURATION ---
 # Replace the placeholder below with your "External Database URL" from the Render dashboard.
 # Example: "postgresql://user:password@hostname.render.com/msl_live_demo"
-LIVE_DB_URL = 'postgresql://james:YmeXArVGRY19ermS7lXy1Op4fVv00Yro@dpg-d7n6k868bjmc738msds0-a.oregon-postgres.render.com/msl_live_demo'
+LIVE_DB_URL = 'postgresql://msl_db_bx39_user:NfV5fQ7kLojvg920DrpmcqLg8RwLFMEQ@dpg-d71ak3vgi27c73fav4ug-a.oregon-postgres.render.com/msl_db_bx39
+'
 
 # Logic to prioritize the environment variable (for Render deployment) 
 # while falling back to your new live URL for local testing.
