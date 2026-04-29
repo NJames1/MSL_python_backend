@@ -1,69 +1,100 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-from sqlalchemy import create_engine
-from datetime import datetime
+from sqlalchemy import create_engine, inspect
 
-st.set_page_config(page_title="MSL Lecturer Dashboard", layout="wide")
+# 1. Page Configuration (Midnight & Teal Engineering Theme)
+st.set_page_config(
+    page_title="MSL Mission Control", 
+    layout="wide", 
+    page_icon="📡",
+    initial_sidebar_state="collapsed"
+)
 
-# Database Connection (Ensure you use the EXTERNAL URL)
-DB_URL = "postgresql://msl_db_bx39_user:NfV5fQ7kLojvg920DrpmcqLg8RwLFMEQ@dpg-d71ak3vgi27c73fav4ug-a.oregon-postgres.render.com/msl_db_bx39"
-engine = create_engine(DB_URL)
+# Custom CSS for that "Engineering" Look
+st.markdown("""
+    <style>
+    .main { background-color: #0F172A; }
+    .stMetric { background-color: #1E293B; padding: 15px; border-radius: 10px; border-left: 5px solid #2DD4BF; }
+    </style>
+""", unsafe_allow_html=True)
 
-# 1. FORCE CACHE CLEAR (This is the most important part)
-@st.cache_data(ttl=5) # Reduced to 5 seconds for live debugging
-def get_live_data():
-    try:
-        return pd.read_sql("SELECT * FROM raw_scans WHERE timestamp >= CURRENT_DATE", engine)
-    except Exception as e:
-        st.error(f"Database Query Error: {e}")
-        return pd.DataFrame()
-
-df = get_live_data()
-
-st.title("👨‍🏫 Lecturer Command Center")
+st.title("🛰️ MSL Identity-Aware Localization")
+st.markdown("### Power-Optimized Mobile Localization System")
 st.markdown("---")
 
-if not df.empty:
-    # 2. SAFETY CHECK: If column is missing, create a dummy one so the app doesn't crash
-    if 'proximity_verified' not in df.columns:
-        st.warning("⚠️ Column 'proximity_verified' not found in DB. Showing raw data instead.")
-        df['proximity_verified'] = False # Temporary dummy column
-    
-    if 'user_name' not in df.columns:
-         df['user_name'] = "Unknown"
+# 2. Database Connection Handling
+db_url_input = st.sidebar.text_input("Render DB URL", type="password")
 
-    # Metrics Calculations
-    total_students = df['user_name'].nunique()
-    verified_df = df[df['proximity_verified'] == True].drop_duplicates(subset=['user_name'])
-    flagged_df = df[df['proximity_verified'] == False].drop_duplicates(subset=['user_name'])
+if db_url_input:
+    # Prefix fix for SQLAlchemy
+    if db_url_input.startswith("postgres://"):
+        db_url_input = db_url_input.replace("postgres://", "postgresql://", 1)
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Students", total_students)
-    with col2:
-        if st.button(f"✅ In Proximity: {len(verified_df)}"):
-            st.session_state.view = "verified"
-    with col3:
-        if st.button(f"🚩 Outside Pool: {len(flagged_df)}"):
-            st.session_state.view = "flagged"
-    with col4:
-        rate = (len(verified_df) / total_students * 100) if total_students > 0 else 0
-        st.metric("Integrity Rate", f"{int(rate)}%")
+    try:
+        engine = create_engine(db_url_input)
+        insp = inspect(engine)
+        existing_tables = insp.get_table_names()
 
-    # Activity Chart
-    st.subheader("Real-Time Engagement")
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    fig = px.line(df.resample('15min', on='timestamp').count().reset_index(), 
-                 x='timestamp', y='id', title="Scan Volume", template="plotly_white")
-    st.plotly_chart(fig, use_container_width=True)
+        # --- NEW NAVIGATION HUB (Clickable Icons) ---
+        st.markdown("#### 🛠️ Select Data View")
+        
+        # Mapping our tables to professional icons and names
+        # Adjust names ('raw_scans', etc.) to match your models.py
+        view_map = {
+            "📡 Live Scans": "raw_scans",
+            "📱 Registered Devices": "devices",
+            "📍 ML Fingerprints": "fingerprints"
+        }
+        
+        # Filter only tables that actually exist in your DB
+        available_views = [k for k, v in view_map.items() if v in existing_tables]
+        
+        if not available_views:
+            st.error(f"No project tables found! Detected: {existing_tables}")
+            selected_view = None
+        else:
+            # Horizontal Selection (Segmented Control / Radio)
+            selected_label = st.radio(
+                "Navigate Database:", 
+                available_views, 
+                horizontal=True,
+                label_visibility="collapsed"
+            )
+            selected_view = view_map[selected_label]
 
-    # Drill-Down Logic
-    if 'view' in st.session_state:
-        st.divider()
-        view_type = st.session_state.view
-        st.write(f"### {'Verified Students' if view_type == 'verified' else 'Flagged Devices'}")
-        display_df = verified_df if view_type == 'verified' else flagged_df
-        st.dataframe(display_df, use_container_width=True)
+        # 3. Data Retrieval & Display
+        if selected_view:
+            query = f"SELECT * FROM {selected_view} ORDER BY id DESC LIMIT 100;"
+            df = pd.read_sql(query, engine)
+
+            # Metric Bar
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.metric("Entries in View", len(df))
+            with m2:
+                # Count unique people if user_name column exists
+                unique_users = df['user_name'].nunique() if 'user_name' in df.columns else "N/A"
+                st.metric("Active Personnel", unique_users)
+            with m3:
+                st.button("🔄 Force Refresh", on_click=lambda: st.rerun(), use_container_width=True)
+
+            # Interactive Table
+            st.markdown(f"### {selected_label} Data Output")
+            
+            # Formatting the dataframe for better aesthetics
+            if not df.empty:
+                # Just display the clean dataframe without math-based highlighting
+                st.dataframe(
+                    df, 
+                    use_container_width=True, 
+                    height=500
+                )
+            else:
+                st.info("Table is empty. Send a scan from the Android app to begin.")
+
+    except Exception as e:
+        st.error(f"⚠️ Connection Error: {e}")
+
 else:
-    st.info("📡 Dashboard connected. Waiting for scans from the American Wing...")
+    st.info("🗝️ Enter your Render Database URL in the sidebar to begin monitoring.")
+    st.image("https://img.icons8.com/clouds/500/satellite.png", width=250)
