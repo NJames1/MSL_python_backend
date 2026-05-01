@@ -82,7 +82,8 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
             is_verified = True if match else False
 
         # INFERENCE WITH ADVANCED ENSEMBLE LOGIC
-        rf_res = nn_res = "Unknown"
+        rf_res = nn_res = "DEBUG: Logic Reached"
+
         
         if rf_model and nn_model and model_features:
             wifi_signals = {f"WIFI_{wifi['bssid']}": wifi['rssi'] for wifi in payload.get('wifiInfo', [])}
