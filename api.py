@@ -28,9 +28,10 @@ except Exception as e:
     logger.error(f"❌ Model load error: {e}")
     rf_model = nn_model = model_features = known_features_set = None
 
-# --- STRICT OUT-OF-BOUNDS (OOD) THRESHOLDS ---
-CONFIDENCE_THRESHOLD = 0.55  # Individual model must be 55% confident
-CONSENSUS_THRESHOLD = 0.45   # If models agree on the room, average confidence only needs to be 45%
+# --- STRICT OUT-OF-BOUNDS & ENSEMBLE THRESHOLDS ---
+CONFIDENCE_THRESHOLD = 0.55       # Individual model must be 55% confident
+CONSENSUS_THRESHOLD = 0.45        # If models agree on the room, average confidence only needs to be 45%
+EXPERT_OVERRIDE_THRESHOLD = 0.60  # If one model is >= 60% confident, it overrides the other's confusion
 MIN_WIFI_RSSI = -85          
 MIN_KNOWN_ROUTERS = 2        
 
@@ -80,7 +81,7 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
             ).first()
             is_verified = True if match else False
 
-        # INFERENCE WITH ENSEMBLE CONSENSUS
+        # INFERENCE WITH ADVANCED ENSEMBLE LOGIC
         rf_res = nn_res = "Unknown"
         
         if rf_model and nn_model and model_features:
@@ -113,13 +114,21 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
                     rf_res = raw_rf_pred if rf_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
                     nn_res = raw_nn_pred if nn_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
 
-                    # Check 4: Ensemble Consensus Rescue
-                    # If they agree on the room, but one got flagged "Outside AW" due to a slight confidence drop
+                    # Check 4: Ensemble Consensus Rescue (Symmetric)
                     if raw_rf_pred == raw_nn_pred:
                         avg_prob = (rf_prob + nn_prob) / 2.0
                         if avg_prob >= CONSENSUS_THRESHOLD:
                             rf_res = raw_rf_pred
                             nn_res = raw_nn_pred
+                    else:
+                        # Check 5: Dynamic Expert Override (Asymmetric)
+                        # If models disagree, let the highly confident "expert" dictate the result
+                        if nn_prob >= EXPERT_OVERRIDE_THRESHOLD and rf_prob < CONFIDENCE_THRESHOLD:
+                            rf_res = raw_nn_pred  # NN rescues RF
+                            nn_res = raw_nn_pred
+                        elif rf_prob >= EXPERT_OVERRIDE_THRESHOLD and nn_prob < CONFIDENCE_THRESHOLD:
+                            rf_res = raw_rf_pred  # RF rescues NN
+                            nn_res = raw_rf_pred
 
         # SAVE RECORD 
         scan = models.RawScan(
@@ -197,12 +206,19 @@ def backfill_predictions(db: Session = Depends(get_db)):
                         scan.rf_prediction = raw_rf_pred if rf_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
                         scan.nn_prediction = raw_nn_pred if nn_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
 
-                        # Ensemble Consensus Rescue
+                        # Advanced Ensemble Logic for Backfill
                         if raw_rf_pred == raw_nn_pred:
                             avg_prob = (rf_prob + nn_prob) / 2.0
                             if avg_prob >= CONSENSUS_THRESHOLD:
                                 scan.rf_prediction = raw_rf_pred
                                 scan.nn_prediction = raw_nn_pred
+                        else:
+                            if nn_prob >= EXPERT_OVERRIDE_THRESHOLD and rf_prob < CONFIDENCE_THRESHOLD:
+                                scan.rf_prediction = raw_nn_pred
+                                scan.nn_prediction = raw_nn_pred
+                            elif rf_prob >= EXPERT_OVERRIDE_THRESHOLD and nn_prob < CONFIDENCE_THRESHOLD:
+                                scan.rf_prediction = raw_rf_pred
+                                scan.nn_prediction = raw_rf_pred
                         
                     processed_count += 1
                     
