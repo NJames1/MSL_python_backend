@@ -121,3 +121,75 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
         db.rollback()
         logger.error(f"💥 Scan Error: {e}")
         return {"success": False, "error": str(e)}
+
+# --- NEW BATCH PROCESSING ENDPOINT ---
+@router.post("/backfill-predictions")
+def backfill_predictions(db: Session = Depends(get_db)):
+    """
+    Finds all records in the database with missing predictions ('Unknown' or null),
+    runs the ML inference on their raw cell_data, and updates the database.
+    """
+    try:
+        if not rf_model or not nn_model or not model_features:
+            return {"success": False, "error": "Machine Learning models are not loaded into memory."}
+
+        # Query all rows where predictions are missing
+        unlabelled_scans = db.query(models.RawScan).filter(
+            (models.RawScan.rf_prediction == "Unknown") | 
+            (models.RawScan.rf_prediction.is_(None)) |
+            (models.RawScan.nn_prediction == "Unknown") |
+            (models.RawScan.nn_prediction.is_(None))
+        ).all()
+
+        if not unlabelled_scans:
+            return {"success": True, "message": "No unlabelled scans found. Database is up to date.", "processed": 0}
+
+        processed_count = 0
+        
+        for scan in unlabelled_scans:
+            try:
+                # 1. Safely extract JSON fingerprint
+                cell_data = scan.cell_data
+                if isinstance(cell_data, str):
+                    cell_data = json.loads(cell_data)
+                    
+                fingerprint_str = cell_data.get('fingerprint', '{}')
+                payload = json.loads(fingerprint_str)
+
+                # 2. Extract signals
+                signals = {}
+                for wifi in payload.get('wifiInfo', []):
+                    signals[f"WIFI_{wifi['bssid']}"] = wifi['rssi']
+                for cell in payload.get('cellInfo', []):
+                    signals[f"CELL_{cell['cid']}"] = cell['rsrp']
+
+                # 3. Apply Differential RSSI & Predict
+                if signals:
+                    max_rssi = max(signals.values())
+                    norm = {k: (v - max_rssi) for k, v in signals.items()}
+                    
+                    # Align to model features
+                    input_df = pd.DataFrame([norm], columns=model_features).fillna(-100)
+                    
+                    # Execute Parallel Inference
+                    scan.rf_prediction = str(rf_model.predict(input_df)[0])
+                    scan.nn_prediction = str(nn_model.predict(scaler.transform(input_df))[0])
+                    processed_count += 1
+                    
+            except Exception as row_error:
+                logger.error(f"⚠️ Error processing scan ID {scan.id}: {row_error}")
+                continue # Skip failing rows and move to the next
+
+        # Commit all updated predictions to the database
+        db.commit()
+        
+        return {
+            "success": True, 
+            "message": f"Successfully updated locations for {processed_count} unlabelled scans.",
+            "processed": processed_count
+        }
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"💥 Backfill Error: {e}")
+        return {"success": False, "error": str(e)}
