@@ -22,7 +22,6 @@ try:
     rf_model = joblib.load('localization_model.pkl')
     nn_model = joblib.load('nn_model.pkl')
     scaler = joblib.load('scaler.pkl')
-    # Convert features to a set for incredibly fast OOD lookups
     model_features = list(joblib.load('model_features.pkl'))
     known_features_set = set(model_features)
 except Exception as e:
@@ -30,9 +29,10 @@ except Exception as e:
     rf_model = nn_model = model_features = known_features_set = None
 
 # --- STRICT OUT-OF-BOUNDS (OOD) THRESHOLDS ---
-CONFIDENCE_THRESHOLD = 0.55  # Increased to 55% majority consensus required
-MIN_WIFI_RSSI = -85          # The strongest Wi-Fi signal must be at least -85 dBm
-MIN_KNOWN_ROUTERS = 2        # Must see at least 2 routers from the AW training data
+CONFIDENCE_THRESHOLD = 0.55  # Individual model must be 55% confident
+CONSENSUS_THRESHOLD = 0.45   # If models agree on the room, average confidence only needs to be 45%
+MIN_WIFI_RSSI = -85          
+MIN_KNOWN_ROUTERS = 2        
 
 class ScanSubmitRequest(BaseModel):
     deviceId: str
@@ -80,38 +80,46 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
             ).first()
             is_verified = True if match else False
 
-        # INFERENCE WITH STRICT OPEN-SET RECOGNITION
+        # INFERENCE WITH ENSEMBLE CONSENSUS
         rf_res = nn_res = "Unknown"
         
         if rf_model and nn_model and model_features:
-            # Separate Wi-Fi and Cell for stricter filtering
             wifi_signals = {f"WIFI_{wifi['bssid']}": wifi['rssi'] for wifi in payload.get('wifiInfo', [])}
             cell_signals = {f"CELL_{cell['cid']}": cell['rsrp'] for cell in cell_info}
             signals = {**wifi_signals, **cell_signals}
             
             if signals:
-                # OOD CHECK 1: How many KNOWN American Wing routers can we actually see?
                 visible_known_routers = [k for k in wifi_signals.keys() if k in known_features_set]
-                
-                # OOD CHECK 2: Is the strongest Wi-Fi physically too weak?
                 max_wifi = max(wifi_signals.values()) if wifi_signals else -100
 
+                # Check 1: Physical Limits
                 if len(visible_known_routers) < MIN_KNOWN_ROUTERS or max_wifi < MIN_WIFI_RSSI:
                     rf_res = "Outside AW"
                     nn_res = "Outside AW"
                 else:
-                    # Proceed with Differential RSSI
                     max_rssi = max(signals.values())
                     norm = {k: (v - max_rssi) for k, v in signals.items()}
                     input_df = pd.DataFrame([norm], columns=model_features).fillna(-100)
                     
-                    # OOD CHECK 3: Model Confidence Checks
+                    # Check 2: Get Raw Predictions & Probabilities
                     rf_prob = max(rf_model.predict_proba(input_df)[0])
-                    rf_res = str(rf_model.predict(input_df)[0]) if rf_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
+                    raw_rf_pred = str(rf_model.predict(input_df)[0])
 
                     input_scaled = scaler.transform(input_df)
                     nn_prob = max(nn_model.predict_proba(input_scaled)[0])
-                    nn_res = str(nn_model.predict(input_scaled)[0]) if nn_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
+                    raw_nn_pred = str(nn_model.predict(input_scaled)[0])
+
+                    # Check 3: Apply Strict Individual Thresholds
+                    rf_res = raw_rf_pred if rf_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
+                    nn_res = raw_nn_pred if nn_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
+
+                    # Check 4: Ensemble Consensus Rescue
+                    # If they agree on the room, but one got flagged "Outside AW" due to a slight confidence drop
+                    if raw_rf_pred == raw_nn_pred:
+                        avg_prob = (rf_prob + nn_prob) / 2.0
+                        if avg_prob >= CONSENSUS_THRESHOLD:
+                            rf_res = raw_rf_pred
+                            nn_res = raw_nn_pred
 
         # SAVE RECORD 
         scan = models.RawScan(
@@ -147,7 +155,6 @@ def backfill_predictions(db: Session = Depends(get_db)):
         if not rf_model or not nn_model or not model_features:
             return {"success": False, "error": "Machine Learning models are not loaded into memory."}
 
-        # Select all scans, so we can overwrite the bad "AW Entrance" predictions
         unlabelled_scans = db.query(models.RawScan).all()
 
         if not unlabelled_scans:
@@ -169,7 +176,6 @@ def backfill_predictions(db: Session = Depends(get_db)):
                 signals = {**wifi_signals, **cell_signals}
 
                 if signals:
-                    # Apply identical Strict OOD Logic to backfill
                     visible_known_routers = [k for k in wifi_signals.keys() if k in known_features_set]
                     max_wifi = max(wifi_signals.values()) if wifi_signals else -100
                     
@@ -182,11 +188,21 @@ def backfill_predictions(db: Session = Depends(get_db)):
                         input_df = pd.DataFrame([norm], columns=model_features).fillna(-100)
                         
                         rf_prob = max(rf_model.predict_proba(input_df)[0])
-                        scan.rf_prediction = str(rf_model.predict(input_df)[0]) if rf_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
+                        raw_rf_pred = str(rf_model.predict(input_df)[0])
                         
                         input_scaled = scaler.transform(input_df)
                         nn_prob = max(nn_model.predict_proba(input_scaled)[0])
-                        scan.nn_prediction = str(nn_model.predict(input_scaled)[0]) if nn_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
+                        raw_nn_pred = str(nn_model.predict(input_scaled)[0])
+
+                        scan.rf_prediction = raw_rf_pred if rf_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
+                        scan.nn_prediction = raw_nn_pred if nn_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
+
+                        # Ensemble Consensus Rescue
+                        if raw_rf_pred == raw_nn_pred:
+                            avg_prob = (rf_prob + nn_prob) / 2.0
+                            if avg_prob >= CONSENSUS_THRESHOLD:
+                                scan.rf_prediction = raw_rf_pred
+                                scan.nn_prediction = raw_nn_pred
                         
                     processed_count += 1
                     
