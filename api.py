@@ -22,14 +22,17 @@ try:
     rf_model = joblib.load('localization_model.pkl')
     nn_model = joblib.load('nn_model.pkl')
     scaler = joblib.load('scaler.pkl')
-    model_features = joblib.load('model_features.pkl')
+    # Convert features to a set for incredibly fast OOD lookups
+    model_features = list(joblib.load('model_features.pkl'))
+    known_features_set = set(model_features)
 except Exception as e:
     logger.error(f"❌ Model load error: {e}")
-    rf_model = nn_model = None
+    rf_model = nn_model = model_features = known_features_set = None
 
-# --- OUT-OF-BOUNDS THRESHOLDS ---
-CONFIDENCE_THRESHOLD = 0.45  # Must be at least 45% confident in a specific room
-MIN_SIGNAL_STRENGTH = -85    # Strongest signal must be at least -85 dBm
+# --- STRICT OUT-OF-BOUNDS (OOD) THRESHOLDS ---
+CONFIDENCE_THRESHOLD = 0.55  # Increased to 55% majority consensus required
+MIN_WIFI_RSSI = -85          # The strongest Wi-Fi signal must be at least -85 dBm
+MIN_KNOWN_ROUTERS = 2        # Must see at least 2 routers from the AW training data
 
 class ScanSubmitRequest(BaseModel):
     deviceId: str
@@ -42,12 +45,10 @@ class ScanSubmitRequest(BaseModel):
 @router.post("/scan")
 def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
     try:
-        # 1. Handle Device
         device = db.query(models.Device).filter(models.Device.device_hash == request.deviceId).first()
         if not device:
             device = models.Device(device_hash=request.deviceId); db.add(device); db.flush()
 
-        # 2. ROBUST CID EXTRACTION
         payload = json.loads(request.fingerprint)
         cell_info = payload.get('cellInfo', [])
         serving_cid = None
@@ -59,7 +60,7 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
         
         logger.info(f"📡 Device {request.userName} latched to CID: {serving_cid}")
 
-        # 3. ANCHOR LOGIC
+        # ANCHOR & PROXIMITY LOGIC
         if request.gpsLat and request.gpsLon and request.locationId and serving_cid:
             anchor = db.query(models.TowerPool).filter_by(location_id=request.locationId, cell_id=serving_cid).first()
             if anchor:
@@ -69,7 +70,6 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
                 db.add(models.TowerPool(location_id=request.locationId, cell_id=serving_cid))
             db.commit()
 
-        # 4. PROXIMITY VERIFICATION
         is_verified = False
         if serving_cid and request.locationId:
             time_limit = datetime.utcnow() - timedelta(hours=5) 
@@ -80,43 +80,40 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
             ).first()
             is_verified = True if match else False
 
-        # 5. INFERENCE (With OOD & Confidence Thresholding)
+        # INFERENCE WITH STRICT OPEN-SET RECOGNITION
         rf_res = nn_res = "Unknown"
         
         if rf_model and nn_model and model_features:
-            signals = {}
-            for wifi in payload.get('wifiInfo', []):
-                signals[f"WIFI_{wifi['bssid']}"] = wifi['rssi']
-            for cell in cell_info:
-                signals[f"CELL_{cell['cid']}"] = cell['rsrp']
+            # Separate Wi-Fi and Cell for stricter filtering
+            wifi_signals = {f"WIFI_{wifi['bssid']}": wifi['rssi'] for wifi in payload.get('wifiInfo', [])}
+            cell_signals = {f"CELL_{cell['cid']}": cell['rsrp'] for cell in cell_info}
+            signals = {**wifi_signals, **cell_signals}
             
             if signals:
-                max_rssi = max(signals.values())
+                # OOD CHECK 1: How many KNOWN American Wing routers can we actually see?
+                visible_known_routers = [k for k in wifi_signals.keys() if k in known_features_set]
                 
-                # OOD CHECK 1: Is the signal physically too weak?
-                if max_rssi < MIN_SIGNAL_STRENGTH:
+                # OOD CHECK 2: Is the strongest Wi-Fi physically too weak?
+                max_wifi = max(wifi_signals.values()) if wifi_signals else -100
+
+                if len(visible_known_routers) < MIN_KNOWN_ROUTERS or max_wifi < MIN_WIFI_RSSI:
                     rf_res = "Outside AW"
                     nn_res = "Outside AW"
                 else:
+                    # Proceed with Differential RSSI
+                    max_rssi = max(signals.values())
                     norm = {k: (v - max_rssi) for k, v in signals.items()}
                     input_df = pd.DataFrame([norm], columns=model_features).fillna(-100)
                     
-                    # OOD CHECK 2: Random Forest Probability
+                    # OOD CHECK 3: Model Confidence Checks
                     rf_prob = max(rf_model.predict_proba(input_df)[0])
-                    if rf_prob >= CONFIDENCE_THRESHOLD:
-                        rf_res = str(rf_model.predict(input_df)[0])
-                    else:
-                        rf_res = "Outside AW"
+                    rf_res = str(rf_model.predict(input_df)[0]) if rf_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
 
-                    # OOD CHECK 3: Neural Network Probability
                     input_scaled = scaler.transform(input_df)
                     nn_prob = max(nn_model.predict_proba(input_scaled)[0])
-                    if nn_prob >= CONFIDENCE_THRESHOLD:
-                        nn_res = str(nn_model.predict(input_scaled)[0])
-                    else:
-                        nn_res = "Outside AW"
+                    nn_res = str(nn_model.predict(input_scaled)[0]) if nn_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
 
-        # 6. SAVE RECORD 
+        # SAVE RECORD 
         scan = models.RawScan(
             device_id=device.id,
             user_name=request.userName,
@@ -150,15 +147,11 @@ def backfill_predictions(db: Session = Depends(get_db)):
         if not rf_model or not nn_model or not model_features:
             return {"success": False, "error": "Machine Learning models are not loaded into memory."}
 
-        unlabelled_scans = db.query(models.RawScan).filter(
-            (models.RawScan.rf_prediction == "Unknown") | 
-            (models.RawScan.rf_prediction.is_(None)) |
-            (models.RawScan.nn_prediction == "Unknown") |
-            (models.RawScan.nn_prediction.is_(None))
-        ).all()
+        # Select all scans, so we can overwrite the bad "AW Entrance" predictions
+        unlabelled_scans = db.query(models.RawScan).all()
 
         if not unlabelled_scans:
-            return {"success": True, "message": "No unlabelled scans found.", "processed": 0}
+            return {"success": True, "message": "No scans found.", "processed": 0}
 
         processed_count = 0
         
@@ -171,20 +164,20 @@ def backfill_predictions(db: Session = Depends(get_db)):
                 fingerprint_str = cell_data.get('fingerprint', '{}')
                 payload = json.loads(fingerprint_str)
 
-                signals = {}
-                for wifi in payload.get('wifiInfo', []):
-                    signals[f"WIFI_{wifi['bssid']}"] = wifi['rssi']
-                for cell in payload.get('cellInfo', []):
-                    signals[f"CELL_{cell['cid']}"] = cell['rsrp']
+                wifi_signals = {f"WIFI_{wifi['bssid']}": wifi['rssi'] for wifi in payload.get('wifiInfo', [])}
+                cell_signals = {f"CELL_{cell['cid']}": cell['rsrp'] for cell in payload.get('cellInfo', [])}
+                signals = {**wifi_signals, **cell_signals}
 
                 if signals:
-                    max_rssi = max(signals.values())
+                    # Apply identical Strict OOD Logic to backfill
+                    visible_known_routers = [k for k in wifi_signals.keys() if k in known_features_set]
+                    max_wifi = max(wifi_signals.values()) if wifi_signals else -100
                     
-                    # Apply identical OOD Logic to backfill
-                    if max_rssi < MIN_SIGNAL_STRENGTH:
+                    if len(visible_known_routers) < MIN_KNOWN_ROUTERS or max_wifi < MIN_WIFI_RSSI:
                         scan.rf_prediction = "Outside AW"
                         scan.nn_prediction = "Outside AW"
                     else:
+                        max_rssi = max(signals.values())
                         norm = {k: (v - max_rssi) for k, v in signals.items()}
                         input_df = pd.DataFrame([norm], columns=model_features).fillna(-100)
                         
@@ -204,7 +197,7 @@ def backfill_predictions(db: Session = Depends(get_db)):
         db.commit()
         return {
             "success": True, 
-            "message": f"Successfully updated locations for {processed_count} unlabelled scans.",
+            "message": f"Successfully updated locations for {processed_count} scans.",
             "processed": processed_count
         }
 
