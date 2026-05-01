@@ -46,12 +46,10 @@ class ScanSubmitRequest(BaseModel):
 @router.post("/scan")
 def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
     try:
-        # 1. Handle Device Registration
         device = db.query(models.Device).filter(models.Device.device_hash == request.deviceId).first()
         if not device:
             device = models.Device(device_hash=request.deviceId); db.add(device); db.flush()
 
-        # 2. Extract Signal Payload
         payload = json.loads(request.fingerprint)
         cell_info = payload.get('cellInfo', [])
         serving_cid = None
@@ -63,7 +61,7 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
         
         logger.info(f"📡 Device {request.userName} latched to CID: {serving_cid}")
 
-        # 3. ANCHOR & PROXIMITY LOGIC
+        # ANCHOR & PROXIMITY LOGIC
         if request.gpsLat and request.gpsLon and request.locationId and serving_cid:
             anchor = db.query(models.TowerPool).filter_by(location_id=request.locationId, cell_id=serving_cid).first()
             if anchor:
@@ -83,7 +81,7 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
             ).first()
             is_verified = True if match else False
 
-        # 4. INFERENCE WITH ADVANCED ENSEMBLE LOGIC
+        # INFERENCE WITH ADVANCED ENSEMBLE LOGIC
         rf_res = nn_res = "Unknown"
         
         if rf_model and nn_model and model_features:
@@ -95,17 +93,15 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
                 visible_known_routers = [k for k in wifi_signals.keys() if k in known_features_set]
                 max_wifi = max(wifi_signals.values()) if wifi_signals else -100
 
-                # OOD Check 1: Physical Signal Constraints
+                # Check 1: Physical Limits
                 if len(visible_known_routers) < MIN_KNOWN_ROUTERS or max_wifi < MIN_WIFI_RSSI:
                     rf_res = "Outside AW"
                     nn_res = "Outside AW"
                 else:
-                    # Apply Differential RSSI: RSSI_diff = RSSI_i - max(RSSI_scan)
                     max_rssi = max(signals.values())
                     norm = {k: (v - max_rssi) for k, v in signals.items()}
                     input_df = pd.DataFrame([norm], columns=model_features).fillna(-100)
                     
-                    # OOD Check 2: Raw Probabilities
                     rf_prob = max(rf_model.predict_proba(input_df)[0])
                     raw_rf_pred = str(rf_model.predict(input_df)[0])
 
@@ -113,18 +109,18 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
                     nn_prob = max(nn_model.predict_proba(input_scaled)[0])
                     raw_nn_pred = str(nn_model.predict(input_scaled)[0])
 
-                    # OOD Check 3: Individual Threshold Application
+                    # Check 3: Apply Strict Individual Thresholds
                     rf_res = raw_rf_pred if rf_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
                     nn_res = raw_nn_pred if nn_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
 
-                    # Ensemble Check 4: Symmetric Consensus Rescue
+                    # Check 4: Ensemble Consensus Rescue
                     if raw_rf_pred == raw_nn_pred:
                         avg_prob = (rf_prob + nn_prob) / 2.0
                         if avg_prob >= CONSENSUS_THRESHOLD:
                             rf_res = raw_rf_pred
                             nn_res = raw_nn_pred
                     else:
-                        # Ensemble Check 5: Asymmetric Expert Override
+                        # Check 5: Dynamic Expert Override
                         if nn_prob >= EXPERT_OVERRIDE_THRESHOLD and rf_prob < CONFIDENCE_THRESHOLD:
                             rf_res = raw_nn_pred
                             nn_res = raw_nn_pred
@@ -132,7 +128,7 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
                             rf_res = raw_rf_pred
                             nn_res = raw_rf_pred
 
-        # 5. PERSIST RECORD TO DATABASE
+        # SAVE RECORD 
         scan = models.RawScan(
             device_id=device.id,
             user_name=request.userName,
@@ -148,13 +144,13 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
         db.add(scan)
         db.commit()
 
-        # 6. RETURN RESULTS TO ANDROID CLIENT
+        # --- FIX: SEND PREDICTIONS BACK TO THE ANDROID APP ---
         return {
             "success": True, 
             "proximity": "Verified" if is_verified else "Unverified",
             "cid": serving_cid,
-            "prediction": rf_res,    # Required for app UI update
-            "nn_prediction": nn_res  # Required for app UI update
+            "prediction": rf_res,    # Your phone needs this key to show the location!
+            "nn_prediction": nn_res  # Your phone needs this key to show the location!
         }
 
     except Exception as e:
@@ -211,7 +207,7 @@ def backfill_predictions(db: Session = Depends(get_db)):
                         scan.rf_prediction = raw_rf_pred if rf_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
                         scan.nn_prediction = raw_nn_pred if nn_prob >= CONFIDENCE_THRESHOLD else "Outside AW"
 
-                        # Ensemble Logic Replication for Backfill
+                        # Advanced Ensemble Logic for Backfill
                         if raw_rf_pred == raw_nn_pred:
                             avg_prob = (rf_prob + nn_prob) / 2.0
                             if avg_prob >= CONSENSUS_THRESHOLD:
