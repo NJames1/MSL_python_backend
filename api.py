@@ -100,12 +100,13 @@ def submit_scan(request: ScanSubmitRequest, db: Session = Depends(get_db)):
                         rf_res = nn_res = raw_nn_pred
                     elif rf_prob >= EXPERT_OVERRIDE_THRESHOLD:
                         rf_res = nn_res = raw_rf_pred
-
+        wifi_list = payload.get('wifiInfo', [])
+        
         scan = models.RawScan(
             device_id=device.id, user_name=request.userName,
             location_id=request.locationId or "Unknown",
             rf_prediction=rf_res, nn_prediction=nn_res,
-            proximity_verified=is_verified, serving_cell=serving_cid, 
+            proximity_verified=is_verified, serving_cell=serving_cid, wifi_data=wifi_list,
             cell_data={"fingerprint": request.fingerprint}
         )
         db.add(scan); db.commit()
