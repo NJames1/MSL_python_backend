@@ -64,7 +64,7 @@ if db_url_input:
 
         # 3. Data Retrieval & Display
         if selected_view:
-            query = f"SELECT * FROM {selected_view} ORDER BY id DESC LIMIT 100;"
+            query = f"SELECT * FROM {selected_view} ORDER BY id DESC LIMIT 300;"
             df = pd.read_sql(query, engine)
 
             # Metric Bar

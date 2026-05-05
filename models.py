@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Float, ForeignKey, Boolean, Numeric
+from sqlalchemy import Column, Integer, String, DateTime, Text, JSON, Float, ForeignKey, Boolean, Numeric
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from db import Base
@@ -25,6 +25,7 @@ class RawScan(Base):
     device_id = Column(Integer, ForeignKey("devices.id"), nullable=True)
     user_name = Column(String)
     location_id = Column(String) # Ground Truth
+    wifi_data = Column(Text, nullable=True)
     
     # AI Predictions
     rf_prediction = Column(String)
